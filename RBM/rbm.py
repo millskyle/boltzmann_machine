@@ -3,19 +3,20 @@ import numpy as np
 
 class RBM(object):
     def __init__(self, FLAGS):
+        self.FLAGS = FLAGS
         self.h_size = FLAGS.h_size
         self.v_size = FLAGS.v_size
         self.batch_size = FLAGS.batch_size
         self.learning_rate = FLAGS.learning_rate
         with tf.variable_scope('RBM'):
-            self.W = tf.get_variable('W', shape=(v_size, h_size), initializer=tf.random_normal_initializer(mean=0.0, stddev=0.5))
-            self.bh = tf.get_variable('b_h', shape=(h_size,), initializer=tf.zeros_initializer())
-            self.bv = tf.get_variable('b_v', shape=(v_size,), initializer=tf.zeros_initializer())
+            self.W = tf.get_variable('W', shape=(self.v_size, self.h_size), initializer=tf.random_normal_initializer(mean=0.0, stddev=0.5))
+            self.bh = tf.get_variable('b_h', shape=(self.h_size,), initializer=tf.zeros_initializer())
+            self.bv = tf.get_variable('b_v', shape=(self.v_size,), initializer=tf.zeros_initializer())
 
-    def _bernoulli_sample(self, p):
+    def _bernoulli_sample(self, p, shape):
         """Using an input vector p of probabilities, return a same-sized vector
            of binary values sampled from the probability distribution p"""
-        return tf.where(tf.less(p, tf.random.uniform(shape=p.shape)), x=tf.zeros_like(p), y=tf.ones_like(p))
+        return tf.where(tf.less(p, tf.random_uniform(shape=shape)), x=tf.zeros_like(p), y=tf.ones_like(p))
 
 
     def _sample_h(self, v):
@@ -28,7 +29,7 @@ class RBM(object):
              samp_h: an h_vector sampled from prob_h
            """
         prob_h = tf.sigmoid(tf.nn.bias_add(tf.matmul(v, self.W), self.bh))
-        samp_h = self._bernoulli_sample(prob_h)
+        samp_h = self._bernoulli_sample(prob_h, shape=[self.FLAGS.batch_size, int(prob_h.shape[-1])])
         return prob_h, samp_h
 
     def _sample_v(self, h):
@@ -37,7 +38,7 @@ class RBM(object):
         """
 
         prob_v = tf.sigmoid(tf.nn.bias_add(tf.matmul(h, tf.transpose(self.W, [1,0])), self.bv))
-        samp_v = self._bernoulli_sample(prob_v)
+        samp_v = self._bernoulli_sample(prob_v, shape=[self.FLAGS.batch_size, int(prob_v.shape[-1])])
         return prob_v, samp_v
 
 
@@ -51,7 +52,7 @@ class RBM(object):
 
         def loop_body(i, vk, hk, v):
             _, hk = self._sample_h(vk)
-            _, vk = self.sample_v(hk)
+            _, vk = self._sample_v(hk)
             #make sure that any vk=-1 stay as -1
             vk = tf.where(tf.less(v,0),v,vk)
             return [i+1, vk, hk, v]
@@ -68,65 +69,66 @@ class RBM(object):
         [i, vk, hk, v] = tf.while_loop(break_condition, loop_body, [i, vk, hk, v])
 
         #get the final h probabilities
-        phk, _ = self.sample_h(vk)
+        phk, _ = self._sample_h(vk)
 
         return v, vk, ph0, phk, i
 
 
-    def _compute_gradients(self, v0, vk, ph0, phk):
-
-        """i loops over examples in the minibatch"""
+    def _compute_gradients(self,v0, vk, ph0, phk):
 
 
-        def break_condition(i, v0, vk, ph0, phk, dW, db_h, db_v):
-            return tf.less(i,k)[0]
+        #end condition for the while loop
+        def condition(i, v0, vk, ph0, phk, dW,db_h,db_v):
+            r=tf.less(i,k)
+            return r[0]
 
+        #loop body
+        def body(i, v0, vk, ph0, phk, dW,dbh,dbv):
 
-        def body(i, v0, vk, ph0, phk, dW, db_h, db_v):
-            v0_ = v0[i]
-            ph0_ = ph0[i]
-            vk_ = vk[i]
-            phk_ = phk[i]
+            v0_=v0[i]
+            ph0_=ph0[i]
 
-            v0_ = tf.reshape(v0_, [self.v_size, 1])
-            ph0_ = tf.reshape(ph0_, [1, self.h_size])
-            vk_ = tf.reshape(vk_, [self.v_size, 1])
-            phk_ = tf.reshape(phk_, [1, self.h_size])
+            vk_=vk[i]
+            phk_=phk[i]
 
-            """dW = v_0 (x) p(h0|v0)  - v_k (x) p(hk|vk)"""
+            #reshaping for making the outer product possible
+            ph0_=tf.reshape(ph0_, [1,self.FLAGS.h_size])
+            v0_=tf.reshape(v0_, [self.FLAGS.v_size,1])
+            phk_=tf.reshape(phk_, [1,self.FLAGS.h_size])
+            vk_=tf.reshape(vk_, [self.FLAGS.v_size,1])
 
-            dW_ = tf.multiply(ph0_, v0_) - tf.multiply(phk_, vk_)
-            dbh_ = ph0_ - phk_
-            dbv_ = v0_ - vk_
+            #calculating the gradiends for weights and biases
+            dw_=tf.subtract(tf.multiply(ph0_, v0_),tf.multiply(phk_, vk_))
+            dbh_=tf.subtract(ph0_,phk_)
+            dbv_=tf.subtract(v0_,vk_)
 
+            dbh_=tf.reshape(dbh_,[self.FLAGS.h_size])
+            dbv_=tf.reshape(dbv_,[self.FLAGS.v_size])
 
-            dbh_ = tf.reshape(dbh_, [self.h_size])
-            dbv_ = tf.reshape(dbv_, [self.v_size])
+            return [i+1, v0, vk, ph0, phk,tf.add(dW,dw_),tf.add(dbh,dbh_),tf.add(dbv,dbv_)]
 
-            return [i+1, v0, vk, ph0, phk, tf.add(dbh, dbh_), tf.add(dbv, dbv_)]
+        i = 0 # start counter for the while loop
+        k=tf.constant([self.FLAGS.batch_size]) # number for the end condition of the while loop
 
+        #init empty placeholders wherer the gradients will be stored
+        dW=tf.zeros((self.FLAGS.v_size, self.FLAGS.h_size))
+        dbh=tf.zeros((self.FLAGS.h_size))
+        dbv=tf.zeros((self.FLAGS.v_size))
 
-        i=0
-        k = tf.constant([self.batch_size])
+        #iterate over the batch and compute for each sample a gradient
+        [i, v0, vk, ph0, phk, dW,db_h,db_v]=tf.while_loop(condition, body,[i, v0, vk, ph0, phk, dW,dbh,dbv])
 
-        dW = tf.zeros((self.v_size, self.h_size))
-        dbh = tf.zeros((self.h_size))
-        dbv = tf.zeros((self.v_size))
+        #devide the summed gradiends by the batch size
+        dW=tf.div(dW, self.FLAGS.batch_size)
+        dbh=tf.div(dbh, self.FLAGS.batch_size)
+        dbv=tf.div(dbv, self.FLAGS.batch_size)
 
-        [i, v0, vk, ph0, phk, dW, db_h, db_v] = tf.while_loop(break_condition, loop_body, [i, v0, vk, ph0, phk, dW,dbh,dbv])
-
-
-        dW /= self.batch_size
-        dbh /= self.batch_size
-        dbv /= self.batch_size
-
-        return dW, dbh, dbv
-
+        return dW,dbh,dbv
 
     def optimize(self, v):
         v0, vk, ph0, phk, _ = self._gibbs_sample(v)
         dW, db_h, db_v = self._compute_gradients(v0, vk, ph0, phk)
-        update_op = self._update_parameter(dW, db_hm, db_v)
+        update_op = self._update_parameters(dW, db_h, db_v)
 
 
         mask=tf.where(tf.less(v0,0.0),x=tf.zeros_like(v0),y=tf.ones_like(v0))
@@ -140,9 +142,9 @@ class RBM(object):
 
     def _update_parameters(self, dW, db_h, db_v):
         update_op = [
-                     tf.assign(self.W, tf.add(self.W, self.learning_rate*self.dW)),
-                     tf.assign(self.bh, tf.add(self.bh, self.learning_rate*self.db_h)),
-                     tf.assign(self.bv, tf.add(self.bv, self.learning_rate*self.db_v))
+                     tf.assign(self.W, tf.add(self.W, self.learning_rate*dW)),
+                     tf.assign(self.bh, tf.add(self.bh, self.learning_rate*db_h)),
+                     tf.assign(self.bv, tf.add(self.bv, self.learning_rate*db_v))
                     ]
         return update_op
 
@@ -151,8 +153,8 @@ class RBM(object):
         """v is set to as much information as we know. We then use this to make an estimate of h,
         then use that h to make an estimate of v.  This 'new' v will include estimates of vs we do not know """
         prob_h = tf.nn.sigmoid(tf.nn.bias_add(tf.matmul(v, self.W), self.bh))
-        samp_h = self._bernoulli_sample(prob_h)
+        samp_h = self._bernoulli_sample(prob_h, shape=[self.FLAGS.batch_size, int(prob_h.shape[-1])])
 
         prob_v = tf.nn.sigmoid(tf.nn.bias_add(tf.matmul(samp_h, tf.transpose(self.W, [1,0])), self.bv))
-        samp_v = self._bernoulli_sample(prob_v)
+        samp_v = self._bernoulli_sample(prob_v, shape=[self.FLAGS.batch_size, int(prob_v.shape[-1])])
         return samp_v
